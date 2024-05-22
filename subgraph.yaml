@@ -8,9 +8,9 @@ dataSources:
     name: OptimismGovernorV6
     network: optimism
     source:
-      address: "0x0c01693a1A4C46cf9A5F56c99304EBB35C4E817a"
+      address: "0xcDF27F107725988f2261Ce2256bDfCdE8B382B10"
       abi: OptimismGovernorV6
-      startBlock: 114779121
+      startBlock: 72813609
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.7
