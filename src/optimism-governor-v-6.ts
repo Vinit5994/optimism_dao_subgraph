@@ -59,7 +59,7 @@ export function handleProposalCanceled(event: ProposalCanceledEvent): void {
 
   entity.save()
 }
-
+//handleProposalCreated
 export function handleProposalCreated(event: ProposalCreatedEvent): void {
   let entity = new ProposalCreated(
     event.transaction.hash.concatI32(event.logIndex.toI32())
