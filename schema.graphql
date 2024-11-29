@@ -162,3 +162,21 @@ type VotingPeriodSet @entity(immutable: true) {
   blockTimestamp: BigInt!
   transactionHash: Bytes!
 }
+
+type ProposalVoteSummary @entity {
+id: ID!
+proposalId: BigInt!
+votesFor: BigInt!
+votesAgainst: BigInt!
+votesAbstain: BigInt!
+totalVotes: BigInt!
+totalWeight: BigInt!
+lastUpdated: BigInt!
+proposal: ProposalCreated
+percentFor: BigDecimal
+percentAgainst: BigDecimal
+percentAbstain: BigDecimal
+weightFor: BigInt!
+weightAgainst: BigInt!
+weightAbstain: BigInt!
+}
