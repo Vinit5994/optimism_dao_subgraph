@@ -15,7 +15,7 @@ import {
   VotingDelaySet as VotingDelaySetEvent,
   VotingPeriodSet as VotingPeriodSetEvent
 } from "../generated/OptimismGovernorV6/OptimismGovernorV6"
-import { Bytes } from "@graphprotocol/graph-ts";
+import { Bytes,log } from "@graphprotocol/graph-ts";
 import {
   Initialized,
   ProposalCanceled,
@@ -32,7 +32,9 @@ import {
   VoteCastWithParams,
   VotingDelaySet,
   VotingPeriodSet,
-  ProposalVoteSummary
+  ProposalDailyVoteSummary,
+  ProposalVoteSummary,
+  VoterDetail
 } from "../generated/schema"
 import {
   BigInt,
@@ -43,12 +45,107 @@ import {
 const ZERO_BI = BigInt.fromI32(0)
 const ZERO_BD = BigDecimal.fromString("0")
 const ONE_BI = BigInt.fromI32(1)
+const SECONDS_PER_DAY = BigInt.fromI32(86400)
+
+// Utility function to get start of day
+function getStartOfDay(timestamp: BigInt): BigInt {
+  return timestamp.div(SECONDS_PER_DAY).times(SECONDS_PER_DAY)
+}
+
+// Utility function to format date as YYYY-MM-DD
+function formatDate(timestamp: BigInt): string {
+  let date = new Date(timestamp.toI64() * 1000)
+  return date.toISOString().split('T')[0]
+}
+
+function findProposalById(proposalId: BigInt): Bytes | null {
+  // Try to find the proposal in different ProposalCreated event types
+  let proposalEvent = ProposalCreated.load(Bytes.fromByteArray(Bytes.fromBigInt(proposalId)));
+  if (proposalEvent) return proposalEvent.id
+
+  let proposal1Event = ProposalCreated1.load(Bytes.fromByteArray(Bytes.fromBigInt(proposalId)));
+  if (proposal1Event) return proposal1Event.id
+
+  let proposal2Event = ProposalCreated2.load(Bytes.fromByteArray(Bytes.fromBigInt(proposalId)));
+  if (proposal2Event) return proposal2Event.id
+
+  let proposal3Event = ProposalCreated3.load(Bytes.fromByteArray(Bytes.fromBigInt(proposalId)));
+  if (proposal3Event) return proposal3Event.id
+
+  return null
+}
+
+function updateProposalDailyVoteSummary(
+  proposalId: BigInt, 
+  support: i32, 
+  weight: BigInt,
+  timestamp: BigInt
+): void {
+  let dayStart = getStartOfDay(timestamp)
+  let summaryId = proposalId.toString() + "-" + dayStart.toString()
+  
+  let dailySummary = ProposalDailyVoteSummary.load(summaryId)
+  
+  // Create if not exists
+  if (!dailySummary) {
+    dailySummary = new ProposalDailyVoteSummary(summaryId)
+    dailySummary.proposalId = proposalId
+    dailySummary.day = dayStart
+    dailySummary.dayString = formatDate(timestamp)
+    dailySummary.votesFor = ZERO_BI
+    dailySummary.votesAgainst = ZERO_BI
+    dailySummary.votesAbstain = ZERO_BI
+    dailySummary.totalVotes = ZERO_BI
+    dailySummary.totalWeight = ZERO_BI
+    dailySummary.weightFor = ZERO_BI
+    dailySummary.weightAgainst = ZERO_BI
+    dailySummary.weightAbstain = ZERO_BI
+    
+    // Link to original proposal from any of the ProposalCreated event types
+    let proposalLinkId = findProposalById(proposalId)
+    if (proposalLinkId) {
+      log.info('Proposal found for proposalId: {}', [proposalId.toString()])
+      dailySummary.proposal = proposalLinkId
+    }
+  }
+  
+  // Update counters based on support type
+  dailySummary.totalVotes = dailySummary.totalVotes.plus(ONE_BI)
+  dailySummary.totalWeight = dailySummary.totalWeight.plus(weight)
+  
+  if (support === 0) {  // Against
+    dailySummary.votesAgainst = dailySummary.votesAgainst.plus(ONE_BI)
+    dailySummary.weightAgainst = dailySummary.weightAgainst.plus(weight)
+  } else if (support === 1) {  // For
+    dailySummary.votesFor = dailySummary.votesFor.plus(ONE_BI)
+    dailySummary.weightFor = dailySummary.weightFor.plus(weight)
+  } else if (support === 2) {  // Abstain
+    dailySummary.votesAbstain = dailySummary.votesAbstain.plus(ONE_BI)
+    dailySummary.weightAbstain = dailySummary.weightAbstain.plus(weight)
+  }
+  
+  // Calculate percentages
+  dailySummary.percentFor = dailySummary.totalVotes.gt(ZERO_BI)
+    ? dailySummary.votesFor.toBigDecimal().div(dailySummary.totalVotes.toBigDecimal()).times(BigDecimal.fromString("100"))
+    : ZERO_BD
+  
+  dailySummary.percentAgainst = dailySummary.totalVotes.gt(ZERO_BI)
+    ? dailySummary.votesAgainst.toBigDecimal().div(dailySummary.totalVotes.toBigDecimal()).times(BigDecimal.fromString("100"))
+    : ZERO_BD
+  
+  dailySummary.percentAbstain = dailySummary.totalVotes.gt(ZERO_BI)
+    ? dailySummary.votesAbstain.toBigDecimal().div(dailySummary.totalVotes.toBigDecimal()).times(BigDecimal.fromString("100"))
+    : ZERO_BD
+  
+  dailySummary.save()
+}
 
 // Utility function to update/create ProposalVoteSummary
 function updateProposalVoteSummary(
   proposalId: BigInt, 
   support: i32, 
   weight: BigInt,
+  voter: Bytes,
   timestamp: BigInt
 ): void {
   let summaryId = proposalId.toString()
@@ -66,14 +163,30 @@ function updateProposalVoteSummary(
     summary.weightFor = ZERO_BI
     summary.weightAgainst = ZERO_BI
     summary.weightAbstain = ZERO_BI
-    
+    summary.voterDetails = []
+    summary.dailySummaries = []; // Initialize with an empty array
+
     // // Optional: Link to original proposal
     // let proposal = ProposalCreated.load(summaryId)
     // if (proposal) {
     //   summary.proposal = proposal.id
     // }
   }
-  
+   // Add Voter Details
+   let voterDetailId = `${summaryId}-${voter.toHexString()}-${timestamp.toString()}`
+   let voterDetail = new VoterDetail(voterDetailId)
+   voterDetail.voter = voter
+   voterDetail.proposalId = proposalId
+   voterDetail.votingPower = weight
+   voterDetail.support = support
+   voterDetail.timestamp = timestamp
+   voterDetail.save()
+   
+   // Update summary's voter details
+   let voterDetails = summary.voterDetails
+   voterDetails.push(voterDetailId)
+   summary.voterDetails = voterDetails
+
   // Update counters based on support type
   summary.totalVotes = summary.totalVotes.plus(ONE_BI)
   summary.totalWeight = summary.totalWeight.plus(weight)
@@ -310,6 +423,13 @@ export function handleVoteCast(event: VoteCastEvent): void {
       event.params.proposalId, 
       event.params.support, 
       event.params.weight,
+      event.params.voter,
+      event.block.timestamp
+    )
+    updateProposalDailyVoteSummary(
+      event.params.proposalId, 
+      event.params.support, 
+      event.params.weight,
       event.block.timestamp
     )
 }
@@ -332,6 +452,13 @@ export function handleVoteCastWithParams(event: VoteCastWithParamsEvent): void {
   entity.save()
    // Update or Create ProposalVoteSummary
    updateProposalVoteSummary(
+    event.params.proposalId, 
+    event.params.support, 
+    event.params.weight,
+    event.params.voter,
+    event.block.timestamp
+  )
+  updateProposalDailyVoteSummary(
     event.params.proposalId, 
     event.params.support, 
     event.params.weight,
